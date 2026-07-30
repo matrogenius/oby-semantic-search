@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: >
+  Infrastructure for the oby-bg semantic search embeddings pipeline: an SQS
+  queue feeds a Node.js Lambda that embeds text with Amazon Bedrock (Titan
+  Text Embeddings V2) and stores the resulting vectors in an S3 Vectors index.
+
+Resources:
+  # ========== S3 BUCKETS ===========
+
+  LambdaZipsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: oby-bg-lambda-zips
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ========== S3 VECTORS ===========
+
+  EmbeddingsVectorBucket:
+    Type: AWS::S3Vectors::VectorBucket
+    Properties:
+      VectorBucketName: oby-bg-vectors
+
+  EmbeddingsVectorIndex:
+    Type: AWS::S3Vectors::Index
+    Properties:
+      IndexName: oby-bg-embeddings-index
+      VectorBucketArn: !Ref EmbeddingsVectorBucket
+      DataType: float32
+      Dimension: 1024
+      DistanceMetric: cosine
+      MetadataConfiguration:
+        NonFilterableMetadataKeys:
+          - text
+
+  # ========= SQS ============
+
+  EmbeddingsSQS:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: oby-bg-embeddings-queue
+      VisibilityTimeout: 180
+
+  EmbeddingsCreatorLambdaSubscriptionToSQS:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      Enabled: true
+      EventSourceArn: !GetAtt EmbeddingsSQS.Arn
+      FunctionName: !Ref EmbeddingsCreatorLambda
+      BatchSize: 10
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+
+  # =========== LAMBDA =============
+
+  EmbeddingsCreatorLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Embeddings creator lambda execution role"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EmbeddingsCreatorPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ConsumeQueue
+                Effect: Allow
+                Action:
+                  - "sqs:ReceiveMessage"
+                  - "sqs:DeleteMessage"
+                  - "sqs:GetQueueAttributes"
+                Resource: !GetAtt EmbeddingsSQS.Arn
+              - Sid: InvokeEmbeddingModel
+                Effect: Allow
+                Action: "bedrock:InvokeModel"
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+              - Sid: WriteVectors
+                Effect: Allow
+                Action: "s3vectors:PutVectors"
+                Resource: !GetAtt EmbeddingsVectorIndex.IndexArn
+      RoleName: ObyBgEmbeddingsCreatorLambdaRole
+
+  EmbeddingsCreatorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: oby-bg-embeddings-creator
+      Description: Embeds SQS message text with Bedrock Titan Text Embeddings V2 and stores the vectors in S3 Vectors
+      Code:
+        S3Bucket: !Ref LambdaZipsS3Bucket
+        S3Key: oby-bg-embeddings-creator.zip
+      Handler: src/index.handler
+      Runtime: nodejs24.x
+      MemorySize: 256
+      Timeout: 30
+      PackageType: Zip
+      Role: !GetAtt EmbeddingsCreatorLambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: amazon.titan-embed-text-v2:0
+          EMBEDDING_DIMENSIONS: 1024
+          VECTOR_BUCKET_NAME: oby-bg-vectors
+          VECTOR_INDEX_NAME: oby-bg-embeddings-index
+
+Outputs:
+  LambdaZipsBucketName:
+    Value: !Ref LambdaZipsS3Bucket
+  VectorBucketArn:
+    Value: !Ref EmbeddingsVectorBucket
+  VectorIndexArn:
+    Value: !GetAtt EmbeddingsVectorIndex.IndexArn
+  EmbeddingsQueueUrl:
+    Value: !Ref EmbeddingsSQS
+  EmbeddingsQueueArn:
+    Value: !GetAtt EmbeddingsSQS.Arn
+  EmbeddingsCreatorLambdaArn:
+    Value: !GetAtt EmbeddingsCreatorLambda.Arn
+  EmbeddingsCreatorLambdaExecutionRoleArn:
+    Value: !GetAtt EmbeddingsCreatorLambdaExecutionRole.Arn
