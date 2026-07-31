@@ -4,6 +4,11 @@ Description: >
   Infrastructure for the oby-bg semantic search embeddings pipeline: an SQS
   queue feeds a Node.js Lambda that embeds text with Amazon Bedrock (Titan
   Text Embeddings V2) and stores the resulting vectors in an S3 Vectors index.
+  A REST API in API Gateway exposes POST /search, backed by a second Lambda
+  that embeds the search string and returns the IDs of the nearest listings
+  found in the S3 Vectors index, optionally filtered by categoryId, and
+  DELETE /embeddings/{id}, backed by a third Lambda that deletes the vector
+  matching that id. Both endpoints require an API key.
 
 Resources:
   # ========== S3 BUCKETS ===========
@@ -119,6 +124,230 @@ Resources:
           VECTOR_BUCKET_NAME: oby-bg-vectors
           VECTOR_INDEX_NAME: oby-bg-embeddings-index
 
+  # =========== SEARCH LAMBDA =============
+
+  SearchLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Search lambda execution role"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SearchPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeEmbeddingModel
+                Effect: Allow
+                Action: "bedrock:InvokeModel"
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+              - Sid: QueryVectors
+                Effect: Allow
+                Action:
+                  - "s3vectors:QueryVectors"
+                  - "s3vectors:GetVectors"
+                Resource: !GetAtt EmbeddingsVectorIndex.IndexArn
+      RoleName: ObyBgSearchLambdaRole
+
+  SearchLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: oby-bg-search
+      Description: Embeds a search query with Bedrock Titan Text Embeddings V2 and returns the nearest listing IDs from S3 Vectors, optionally filtered by categoryId
+      Code:
+        S3Bucket: !Ref LambdaZipsS3Bucket
+        S3Key: oby-bg-search.zip
+      Handler: src/index.handler
+      Runtime: nodejs24.x
+      MemorySize: 256
+      Timeout: 10
+      PackageType: Zip
+      Role: !GetAtt SearchLambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: amazon.titan-embed-text-v2:0
+          EMBEDDING_DIMENSIONS: 1024
+          VECTOR_BUCKET_NAME: oby-bg-vectors
+          VECTOR_INDEX_NAME: oby-bg-embeddings-index
+          MAX_SEARCH_RESULTS: 200
+
+  SearchApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SearchLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SearchRestApi}/*/POST/search"
+
+  # =========== SEARCH REST API =============
+
+  SearchRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: oby-bg-search-api
+      Description: Public REST API exposing POST /search, backed by the oby-bg-search Lambda via a proxy integration.
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  SearchResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchRestApi
+      ParentId: !GetAtt SearchRestApi.RootResourceId
+      PathPart: search
+
+  SearchMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchRestApi
+      ResourceId: !Ref SearchResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchLambda.Arn}/invocations"
+
+  # =========== EMBEDDINGS DELETE LAMBDA =============
+
+  EmbeddingsDeleteLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Embeddings delete lambda execution role"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EmbeddingsDeletePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DeleteVectors
+                Effect: Allow
+                Action: "s3vectors:DeleteVectors"
+                Resource: !GetAtt EmbeddingsVectorIndex.IndexArn
+      RoleName: ObyBgEmbeddingsDeleteLambdaRole
+
+  EmbeddingsDeleteLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: oby-bg-embeddings-delete
+      Description: Deletes the vector matching a given listing ID from the S3 Vectors index
+      Code:
+        S3Bucket: !Ref LambdaZipsS3Bucket
+        S3Key: oby-bg-embeddings-delete.zip
+      Handler: src/index.handler
+      Runtime: nodejs24.x
+      MemorySize: 256
+      Timeout: 10
+      PackageType: Zip
+      Role: !GetAtt EmbeddingsDeleteLambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          VECTOR_BUCKET_NAME: oby-bg-vectors
+          VECTOR_INDEX_NAME: oby-bg-embeddings-index
+
+  EmbeddingsDeleteApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref EmbeddingsDeleteLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SearchRestApi}/*/DELETE/embeddings/*"
+
+  # =========== EMBEDDINGS DELETE REST API =============
+
+  EmbeddingsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchRestApi
+      ParentId: !GetAtt SearchRestApi.RootResourceId
+      PathPart: embeddings
+
+  EmbeddingsIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SearchRestApi
+      ParentId: !Ref EmbeddingsResource
+      PathPart: "{id}"
+
+  EmbeddingsDeleteMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SearchRestApi
+      ResourceId: !Ref EmbeddingsIdResource
+      HttpMethod: DELETE
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${EmbeddingsDeleteLambda.Arn}/invocations"
+
+  # =========== SEARCH API DEPLOYMENT & AUTH =============
+
+  SearchApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - SearchMethod
+      - EmbeddingsDeleteMethod
+    Properties:
+      RestApiId: !Ref SearchRestApi
+
+  SearchApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref SearchRestApi
+      DeploymentId: !Ref SearchApiDeployment
+      StageName: v1
+
+  SearchApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn:
+      - SearchApiStage
+    Properties:
+      Name: oby-bg-search-api-key
+      Description: API key required to call the oby-bg-search-api REST API.
+      Enabled: true
+
+  SearchApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - SearchApiStage
+    Properties:
+      UsagePlanName: oby-bg-search-api-usage-plan
+      ApiStages:
+        - ApiId: !Ref SearchRestApi
+          Stage: !Ref SearchApiStage
+
+  SearchApiUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref SearchApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref SearchApiUsagePlan
+
 Outputs:
   LambdaZipsBucketName:
     Value: !Ref LambdaZipsS3Bucket
@@ -134,3 +363,20 @@ Outputs:
     Value: !GetAtt EmbeddingsCreatorLambda.Arn
   EmbeddingsCreatorLambdaExecutionRoleArn:
     Value: !GetAtt EmbeddingsCreatorLambdaExecutionRole.Arn
+  SearchLambdaArn:
+    Value: !GetAtt SearchLambda.Arn
+  SearchLambdaExecutionRoleArn:
+    Value: !GetAtt SearchLambdaExecutionRole.Arn
+  SearchApiUrl:
+    Value: !Sub "https://${SearchRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/search"
+  EmbeddingsDeleteLambdaArn:
+    Value: !GetAtt EmbeddingsDeleteLambda.Arn
+  EmbeddingsDeleteLambdaExecutionRoleArn:
+    Value: !GetAtt EmbeddingsDeleteLambdaExecutionRole.Arn
+  EmbeddingsDeleteApiUrl:
+    Value: !Sub "https://${SearchRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/embeddings/{id}"
+  SearchApiKeyId:
+    Description: >-
+      API key ID. Retrieve the actual key value with:
+      aws apigateway get-api-key --api-key <this value> --include-value --query value --output text
+    Value: !Ref SearchApiKey

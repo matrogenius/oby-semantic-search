@@ -1,0 +1,14 @@
+{
+  "name": "oby-bg-search-lambda",
+  "version": "1.0.0",
+  "description": "API Gateway-triggered Lambda that embeds a search query with Amazon Bedrock Titan Text Embeddings V2 and returns the nearest ad IDs from an Amazon S3 Vectors index.",
+  "type": "module",
+  "main": "src/index.mjs",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1098.0",
+    "@aws-sdk/client-s3vectors": "^3.1098.0"
+  }
+}

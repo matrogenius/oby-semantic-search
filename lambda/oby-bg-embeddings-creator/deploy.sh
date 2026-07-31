@@ -15,7 +15,7 @@ AWS_REGION=eu-south-1
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAMBDA_DIR="$SCRIPT_DIR/../lambda"
+LAMBDA_DIR="$SCRIPT_DIR"
 
 FUNCTION_NAME="oby-bg-embeddings-creator"
 DEPLOY_BUCKET="oby-bg-lambda-zips"
