@@ -2,13 +2,14 @@ AWSTemplateFormatVersion: 2010-09-09
 
 Description: >
   Infrastructure for the oby-bg semantic search embeddings pipeline: an SQS
-  queue feeds a Node.js Lambda that embeds text with Amazon Bedrock (Titan
-  Text Embeddings V2) and stores the resulting vectors in an S3 Vectors index.
-  A REST API in API Gateway exposes POST /search, backed by a second Lambda
-  that embeds the search string and returns the IDs of the nearest listings
-  found in the S3 Vectors index, optionally filtered by categoryId, and
-  DELETE /embeddings/{id}, backed by a third Lambda that deletes the vector
-  matching that id. Both endpoints require an API key.
+  queue feeds a Node.js Lambda that, based on the "operation" property
+  ("create" or "delete") of each message, either embeds the message text with
+  Amazon Bedrock (Titan Text Embeddings V2) and stores the resulting vector in
+  an S3 Vectors index, or deletes the vector matching the message's
+  listingId. A REST API in API Gateway exposes POST /search, backed by a
+  second Lambda that embeds the search string and returns the IDs of the
+  nearest listings found in the S3 Vectors index, optionally filtered by
+  categoryId. The endpoint requires an API key.
 
 Resources:
   # ========== S3 BUCKETS ===========
@@ -54,19 +55,19 @@ Resources:
       QueueName: oby-bg-embeddings-queue
       VisibilityTimeout: 180
 
-  EmbeddingsCreatorLambdaSubscriptionToSQS:
+  EmbeddingsLambdaSubscriptionToSQS:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
       Enabled: true
       EventSourceArn: !GetAtt EmbeddingsSQS.Arn
-      FunctionName: !Ref EmbeddingsCreatorLambda
+      FunctionName: !Ref EmbeddingsLambda
       BatchSize: 10
       FunctionResponseTypes:
         - ReportBatchItemFailures
 
   # =========== LAMBDA =============
 
-  EmbeddingsCreatorLambdaExecutionRole:
+  EmbeddingsLambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -78,11 +79,11 @@ Resources:
                 - lambda.amazonaws.com
             Action:
               - 'sts:AssumeRole'
-      Description: "Embeddings creator lambda execution role"
+      Description: "Embeddings lambda execution role"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: EmbeddingsCreatorPermissions
+        - PolicyName: EmbeddingsPermissions
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -99,24 +100,26 @@ Resources:
                 Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
               - Sid: WriteVectors
                 Effect: Allow
-                Action: "s3vectors:PutVectors"
+                Action:
+                  - "s3vectors:PutVectors"
+                  - "s3vectors:DeleteVectors"
                 Resource: !GetAtt EmbeddingsVectorIndex.IndexArn
-      RoleName: ObyBgEmbeddingsCreatorLambdaRole
+      RoleName: ObyBgEmbeddingsLambdaRole
 
-  EmbeddingsCreatorLambda:
+  EmbeddingsLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: oby-bg-embeddings-creator
-      Description: Embeds SQS message text with Bedrock Titan Text Embeddings V2 and stores the vectors in S3 Vectors
+      FunctionName: oby-bg-embeddings
+      Description: Processes SQS messages with an "operation" of "create" (embeds the message text with Bedrock Titan Text Embeddings V2 and stores the vector in S3 Vectors) or "delete" (deletes the matching vector from S3 Vectors)
       Code:
         S3Bucket: !Ref LambdaZipsS3Bucket
-        S3Key: oby-bg-embeddings-creator.zip
+        S3Key: oby-bg-embeddings.zip
       Handler: src/index.handler
       Runtime: nodejs24.x
       MemorySize: 256
       Timeout: 30
       PackageType: Zip
-      Role: !GetAtt EmbeddingsCreatorLambdaExecutionRole.Arn
+      Role: !GetAtt EmbeddingsLambdaExecutionRole.Arn
       Environment:
         Variables:
           BEDROCK_MODEL_ID: amazon.titan-embed-text-v2:0
@@ -219,99 +222,12 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchLambda.Arn}/invocations"
 
-  # =========== EMBEDDINGS DELETE LAMBDA =============
-
-  EmbeddingsDeleteLambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Description: "Embeddings delete lambda execution role"
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: EmbeddingsDeletePermissions
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: DeleteVectors
-                Effect: Allow
-                Action: "s3vectors:DeleteVectors"
-                Resource: !GetAtt EmbeddingsVectorIndex.IndexArn
-      RoleName: ObyBgEmbeddingsDeleteLambdaRole
-
-  EmbeddingsDeleteLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: oby-bg-embeddings-delete
-      Description: Deletes the vector matching a given listing ID from the S3 Vectors index
-      Code:
-        S3Bucket: !Ref LambdaZipsS3Bucket
-        S3Key: oby-bg-embeddings-delete.zip
-      Handler: src/index.handler
-      Runtime: nodejs24.x
-      MemorySize: 256
-      Timeout: 10
-      PackageType: Zip
-      Role: !GetAtt EmbeddingsDeleteLambdaExecutionRole.Arn
-      Environment:
-        Variables:
-          VECTOR_BUCKET_NAME: oby-bg-vectors
-          VECTOR_INDEX_NAME: oby-bg-embeddings-index
-
-  EmbeddingsDeleteApiGatewayInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref EmbeddingsDeleteLambda
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SearchRestApi}/*/DELETE/embeddings/*"
-
-  # =========== EMBEDDINGS DELETE REST API =============
-
-  EmbeddingsResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref SearchRestApi
-      ParentId: !GetAtt SearchRestApi.RootResourceId
-      PathPart: embeddings
-
-  EmbeddingsIdResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref SearchRestApi
-      ParentId: !Ref EmbeddingsResource
-      PathPart: "{id}"
-
-  EmbeddingsDeleteMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref SearchRestApi
-      ResourceId: !Ref EmbeddingsIdResource
-      HttpMethod: DELETE
-      AuthorizationType: NONE
-      ApiKeyRequired: true
-      RequestParameters:
-        method.request.path.id: true
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${EmbeddingsDeleteLambda.Arn}/invocations"
-
   # =========== SEARCH API DEPLOYMENT & AUTH =============
 
   SearchApiDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - SearchMethod
-      - EmbeddingsDeleteMethod
     Properties:
       RestApiId: !Ref SearchRestApi
 
@@ -359,22 +275,16 @@ Outputs:
     Value: !Ref EmbeddingsSQS
   EmbeddingsQueueArn:
     Value: !GetAtt EmbeddingsSQS.Arn
-  EmbeddingsCreatorLambdaArn:
-    Value: !GetAtt EmbeddingsCreatorLambda.Arn
-  EmbeddingsCreatorLambdaExecutionRoleArn:
-    Value: !GetAtt EmbeddingsCreatorLambdaExecutionRole.Arn
+  EmbeddingsLambdaArn:
+    Value: !GetAtt EmbeddingsLambda.Arn
+  EmbeddingsLambdaExecutionRoleArn:
+    Value: !GetAtt EmbeddingsLambdaExecutionRole.Arn
   SearchLambdaArn:
     Value: !GetAtt SearchLambda.Arn
   SearchLambdaExecutionRoleArn:
     Value: !GetAtt SearchLambdaExecutionRole.Arn
   SearchApiUrl:
     Value: !Sub "https://${SearchRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/search"
-  EmbeddingsDeleteLambdaArn:
-    Value: !GetAtt EmbeddingsDeleteLambda.Arn
-  EmbeddingsDeleteLambdaExecutionRoleArn:
-    Value: !GetAtt EmbeddingsDeleteLambdaExecutionRole.Arn
-  EmbeddingsDeleteApiUrl:
-    Value: !Sub "https://${SearchRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/embeddings/{id}"
   SearchApiKeyId:
     Description: >-
       API key ID. Retrieve the actual key value with:

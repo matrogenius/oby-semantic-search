@@ -1,13 +1,14 @@
 import { embedText } from "./embeddings.mjs";
-import { putVector } from "./vectors.mjs";
-
-const MAX_METADATA_TEXT_LENGTH = 2000;
+import { putVector, deleteVector } from "./vectors.mjs";
 
 /**
  * Parses and validates the SQS message contract:
- * { "listingId": "<id>", "content": "...", "categoryId": <number> }.
- * Throws if the body isn't valid JSON or doesn't match this shape - callers
- * must not fall back to treating the body as plain text.
+ * { "operation": "create", "listingId": "<id>", "content": "...", "categoryId": <number> }
+ * or { "operation": "delete", "listingId": "<id>" }.
+ * Throws if the body isn't valid JSON, doesn't match this shape, or is
+ * missing "listingId" - callers must not fall back to treating the body as
+ * plain text. Returns null when "operation" isn't "create" or "delete",
+ * signalling that the message must be ignored.
  */
 function parseMessage(body) {
   let parsed;
@@ -21,11 +22,22 @@ function parseMessage(body) {
     throw new Error("Message body must be a JSON object");
   }
 
-  const { listingId, content, categoryId } = parsed;
+  const { operation, listingId } = parsed;
+
+  if (operation !== "create" && operation !== "delete") {
+    return null;
+  }
 
   if (typeof listingId !== "string" || !listingId.trim()) {
     throw new Error('Message body must contain a non-empty string "listingId"');
   }
+
+  if (operation === "delete") {
+    return { operation, listingId: listingId.trim() };
+  }
+
+  const { content, categoryId } = parsed;
+
   if (typeof content !== "string" || !content.trim()) {
     throw new Error('Message body must contain a non-empty string "content"');
   }
@@ -33,7 +45,7 @@ function parseMessage(body) {
     throw new Error('Message body must contain a numeric "categoryId"');
   }
 
-  return { listingId, content: content.trim(), categoryId };
+  return { operation, listingId: listingId.trim(), content: content.trim(), categoryId };
 }
 
 /**
@@ -45,17 +57,26 @@ export const handler = async (event) => {
 
   for (const record of event.Records ?? []) {
     try {
-      const { listingId, content, categoryId } = parseMessage(record.body ?? "");
+      const message = parseMessage(record.body ?? "");
 
-      const embedding = await embedText(content);
+      if (!message) {
+        console.warn(`Ignoring message ${record.messageId}: unrecognized "operation"`);
+        continue;
+      }
+
+      if (message.operation === "delete") {
+        await deleteVector(message.listingId);
+        continue;
+      }
+
+      const embedding = await embedText(message.content);
 
       await putVector({
-        key: listingId,
+        key: message.listingId,
         embedding,
         metadata: {
-          listingId,
-          categoryId,
-          text: content.slice(0, MAX_METADATA_TEXT_LENGTH),
+          listingId: message.listingId,
+          categoryId: message.categoryId,
           ingestedAt: new Date().toISOString(),
         },
       });

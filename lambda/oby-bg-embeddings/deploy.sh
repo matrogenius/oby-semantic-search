@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Builds, packages, and deploys code for the oby-bg-embeddings-creator Lambda
+# Builds, packages, and deploys code for the oby-bg-embeddings Lambda
 # function. The bucket, execution role, SQS queue, and S3 Vectors bucket/index
 # are all created by infrastructure/infrastructure.yaml; this script only
 # pushes new code to the already-existing function.
@@ -17,9 +17,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAMBDA_DIR="$SCRIPT_DIR"
 
-FUNCTION_NAME="oby-bg-embeddings-creator"
+FUNCTION_NAME="oby-bg-embeddings"
 DEPLOY_BUCKET="oby-bg-lambda-zips"
-DEPLOY_KEY="oby-bg-embeddings-creator.zip"
+DEPLOY_KEY="oby-bg-embeddings.zip"
 
 : "${AWS_REGION:?Set AWS_REGION (e.g. us-east-1)}"
 
