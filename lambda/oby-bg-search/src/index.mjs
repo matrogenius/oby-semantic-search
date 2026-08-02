@@ -19,8 +19,9 @@ function parseRequestBody(event) {
  * Lambda handler for the API Gateway proxy integration backing
  * POST /search with body { searchString: string, categoryId?: number }.
  * Embeds the search string with Bedrock Titan Text Embeddings V2 and
- * returns the IDs of the closest listings found in the S3 Vectors index,
- * optionally restricted to a single categoryId.
+ * returns the closest listings found in the S3 Vectors index, each with its
+ * ID and its distance to the query (lower = closer match), optionally
+ * restricted to a single categoryId.
  */
 export const handler = async (event) => {
   let requestBody;
@@ -46,8 +47,8 @@ export const handler = async (event) => {
 
   try {
     const embedding = await embedText(searchString.trim());
-    const ids = await queryVectors(embedding, { categoryId: categoryFilter });
-    return jsonResponse(200, { ids });
+    const results = await queryVectors(embedding, { categoryId: categoryFilter });
+    return jsonResponse(200, { results });
   } catch (error) {
     console.error("Search failed:", error);
     return jsonResponse(500, { message: "Internal server error" });
