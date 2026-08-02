@@ -3,7 +3,7 @@ import { putVector, deleteVector } from "./vectors.mjs";
 
 /**
  * Parses and validates the SQS message contract:
- * { "operation": "create", "listingId": "<id>", "content": "...", "categoryId": <number> }
+ * { "operation": "create", "listingId": "<id>", "content": "...", "categoryId": "<string>" }
  * or { "operation": "delete", "listingId": "<id>" }.
  * Throws if the body isn't valid JSON, doesn't match this shape, or is
  * missing "listingId" - callers must not fall back to treating the body as
@@ -41,11 +41,11 @@ function parseMessage(body) {
   if (typeof content !== "string" || !content.trim()) {
     throw new Error('Message body must contain a non-empty string "content"');
   }
-  if (typeof categoryId !== "number" || !Number.isFinite(categoryId)) {
-    throw new Error('Message body must contain a numeric "categoryId"');
+  if (typeof categoryId !== "string" || !categoryId.trim()) {
+    throw new Error('Message body must contain a non-empty string "categoryId"');
   }
 
-  return { operation, listingId: listingId.trim(), content: content.trim(), categoryId };
+  return { operation, listingId: listingId.trim(), content: content.trim(), categoryId: categoryId.trim() };
 }
 
 /**
